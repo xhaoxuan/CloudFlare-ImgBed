@@ -1,3 +1,6 @@
+import { getDatabase } from '../../../utils/databaseAdapter.js';
+import { createApiToken, deleteApiToken } from '../apiTokens.js';
+
 export async function onRequest(context) {
     // 其他设置相关，GET方法读取设置，POST方法保存设置
     const {
@@ -9,11 +12,11 @@ export async function onRequest(context) {
       data, // arbitrary space for passing data between middlewares
     } = context;
 
-    const kv = env.img_url
+    const db = getDatabase(env);
 
     // GET读取设置
     if (request.method === 'GET') {
-        const settings = await getOthersConfig(kv, env)
+        const settings = await getOthersConfig(db, env)
 
         return new Response(JSON.stringify(settings), {
             headers: {
@@ -27,8 +30,37 @@ export async function onRequest(context) {
         const body = await request.json()
         const settings = body
 
-        // 写入 KV
-        await kv.put('manage@sysConfig@others', JSON.stringify(settings))
+        const oldSettings = await getOthersConfig(db, env);
+
+        delete settings.fileExpiry;
+
+        // WebDAV internal token 管理
+        const webDAV = settings.webDAV || {};
+        const wasEnabled = oldSettings.webDAV?.enabled;
+        const isEnabled = webDAV.enabled;
+
+        if (isEnabled && !webDAV.internalToken) {
+            // 启用 WebDAV 且没有 token，创建一个 internal 类型的 API Token
+            const tokenResult = await createApiToken(
+                db,
+                'WebDAV Internal Token',
+                ['list', 'upload', 'delete'],
+                'system',
+                null,   // 不过期
+                false,  // 不自动删除
+                'internal'
+            );
+            settings.webDAV.internalToken = tokenResult.token;
+            settings.webDAV.internalTokenId = tokenResult.id;
+        } else if (!isEnabled && oldSettings.webDAV?.internalTokenId) {
+            // 禁用 WebDAV，删除 internal token
+            await deleteApiToken(db, oldSettings.webDAV.internalTokenId);
+            settings.webDAV.internalToken = '';
+            settings.webDAV.internalTokenId = '';
+        }
+
+        // 写入数据库
+        await db.put('manage@sysConfig@others', JSON.stringify(settings))
 
         return new Response(JSON.stringify(settings), {
             headers: {
@@ -39,10 +71,10 @@ export async function onRequest(context) {
 
 }
 
-export async function getOthersConfig(kv, env) {
+export async function getOthersConfig(db, env) {
     const settings = {}
-    // 读取KV中的设置
-    const settingsStr = await kv.get('manage@sysConfig@others')
+    // 读取数据库中的设置
+    const settingsStr = await db.get('manage@sysConfig@others')
     const settingsKV = settingsStr ? JSON.parse(settingsStr) : {}
 
     // 远端遥测
@@ -69,6 +101,26 @@ export async function getOthersConfig(kv, env) {
         fixed: false,
     }
 
+    // WebDAV
+    const kvWebDAV = settingsKV.webDAV || {}
+    settings.webDAV = {
+        enabled: kvWebDAV.enabled ?? false,
+        username: kvWebDAV.username || '',
+        password: kvWebDAV.password || '',
+        uploadChannel: kvWebDAV.uploadChannel || '',
+        channelName: kvWebDAV.channelName || '',
+        internalToken: kvWebDAV.internalToken || '',
+        internalTokenId: kvWebDAV.internalTokenId || '',
+        fixed: false,
+    }
+
+    // 公开浏览
+    const kvPublicBrowse = settingsKV.publicBrowse || {}
+    settings.publicBrowse = {
+        enabled: kvPublicBrowse.enabled ?? false,
+        allowedDir: kvPublicBrowse.allowedDir || '',
+        fixed: false,
+    }
 
     return settings;
 }

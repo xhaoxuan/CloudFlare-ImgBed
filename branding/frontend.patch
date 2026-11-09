@@ -1,0 +1,122 @@
+diff --git a/public/index.html b/public/index.html
+index 014171f..4b85f17 100644
+--- a/public/index.html
++++ b/public/index.html
+@@ -32,10 +32,10 @@
+   <link rel="apple-touch-icon" href="<%= BASE_URL %>static/media/logo.png">
+   <link rel="mask-icon" href="<%= BASE_URL %>static/media/logo.png" color="#f4b400">
+   <link rel="preload" href="<%= require('../src/assets/fonts/Pacifico-Regular.woff2') %>" as="font" type="font/woff2" crossorigin>
+-  <meta name="description" content="Sanyue ImgHub - A modern file hosting platform">
+-  <meta name="keywords" content="Sanyue, ImgHub, file hosting, image hosting, cloud storage">
+-  <meta name="author" content="SanyueQi">
+-  <title>Sanyue ImgHub</title>
++  <meta name="description" content="ihyuaan ImgHub - A modern file hosting platform">
++  <meta name="keywords" content="ihyuaan, ImgHub, file hosting, image hosting, cloud storage">
++  <meta name="author" content="ihyuaanQi">
++  <title>ihyuaan ImgHub</title>
+   <link rel="stylesheet" href="<%= require('../src/entry/entry-loader.css') %>">
+   <% for (const css of htmlWebpackPlugin.files.css) { %>
+     <link rel="stylesheet" href="<%= css %>">
+diff --git a/src/components/Footer.vue b/src/components/Footer.vue
+index 9006d05..0252d86 100644
+--- a/src/components/Footer.vue
++++ b/src/components/Footer.vue
+@@ -1,6 +1,6 @@
+ <template>
+     <div class="page-footer" data-entry="up" v-if="!disableFooter">
+-        <p>© 2024-{{ thisYear }} Designed by <a class="footer-name" href="https://github.com/MarSeventh" target="_blank">SanyueQi</a> for You!
++        <p>© 2024-{{ thisYear }} Designed by <a class="footer-name" href="https://blog.04mc.com" target="_blank">iHYUAAN</a> for You!
+             <a :href="footerLink" target="_blank">
+                 <font-awesome-icon icon="paper-plane" class="footer-link-icon"/>
+             </a>
+@@ -16,7 +16,7 @@ export default {
+     computed: {
+         ...mapGetters(['userConfig']),
+         footerLink() {
+-            return this.userConfig?.footerLink || 'https://github.com/MarSeventh'
++            return this.userConfig?.footerLink || 'https://blog.04mc.com'
+         },
+         thisYear() {
+             return new Date().getFullYear()
+diff --git a/src/components/Logo.vue b/src/components/Logo.vue
+index 0fcee0d..39c46a9 100644
+--- a/src/components/Logo.vue
++++ b/src/components/Logo.vue
+@@ -23,7 +23,7 @@ export default {
+     // Logo链接地址（可被用户配置覆盖）
+     href: {
+       type: String,
+-      default: 'https://github.com/MarSeventh/CloudFlare-ImgBed'
++      default: 'https://blog.04mc.com'
+     },
+     // 链接打开方式
+     target: {
+diff --git a/src/entry/entry-loader.js b/src/entry/entry-loader.js
+index 71780ee..04e18ac 100644
+--- a/src/entry/entry-loader.js
++++ b/src/entry/entry-loader.js
+@@ -22,7 +22,7 @@
+   const updateConfig = (config, locale, ready = false) => {
+     // ownerName 对应后台的“图床名称”，siteTitle 是网页标题，只作为备用。
+     // 数字也可以作为自定义名称；缓存缺失时等配置返回，避免闪现默认品牌。
+-    const nextTitle = configText(config?.ownerName) || configText(config?.siteTitle) || (ready ? 'Sanyue ImgHub' : '');
++    const nextTitle = configText(config?.ownerName) || configText(config?.siteTitle) || (ready ? 'ihyuaan ImgHub' : '');
+     loader.setAttribute('aria-label', `${locale === 'zh-CN' ? '正在加载' : 'Loading'}${nextTitle ? ` ${nextTitle}` : ''}`);
+     if (title === nextTitle) return;
+ 
+diff --git a/src/main.js b/src/main.js
+index 71ad733..005a991 100644
+--- a/src/main.js
++++ b/src/main.js
+@@ -73,7 +73,7 @@ const applyDarkModeClass = (isDarkMode) => {
+ 
+ // 预设网站标题的函数
+ const presetSiteTitle = (userConfig) => {
+-    document.title = userConfig?.siteTitle || 'Sanyue ImgHub';
++    document.title = userConfig?.siteTitle || 'ihyuaan ImgHub';
+ };
+ 
+ // 预设和更新网站图标的函数
+diff --git a/src/views/Login.vue b/src/views/Login.vue
+index c45396d..5cbcd0c 100644
+--- a/src/views/Login.vue
++++ b/src/views/Login.vue
+@@ -32,7 +32,7 @@ export default {
+         },
+         loginTitle() {
+             return this.$t(this.customOwnerName ? 'login.customTitle' : 'login.title', {
+-                owner: this.customOwnerName || 'Sanyue'
++                owner: this.customOwnerName || 'ihyuaan'
+             })
+         }
+     },
+diff --git a/src/views/PublicBrowse.vue b/src/views/PublicBrowse.vue
+index 3a00050..a3833f1 100644
+--- a/src/views/PublicBrowse.vue
++++ b/src/views/PublicBrowse.vue
+@@ -378,7 +378,7 @@ export default {
+   computed: {
+     ...mapGetters(['userConfig']),
+     siteName() {
+-      return this.userConfig?.siteTitle || 'Sanyue ImgHub';
++      return this.userConfig?.siteTitle || 'ihyuaan ImgHub';
+     },
+     rootDirName() {
+       return this.rootDir.split('/').filter(Boolean).pop() || this.$t('publicBrowse.rootDirectory');
+diff --git a/src/views/UploadHome.vue b/src/views/UploadHome.vue
+index e105564..9600c63 100644
+--- a/src/views/UploadHome.vue
++++ b/src/views/UploadHome.vue
+@@ -398,10 +398,10 @@ export default {
+                 : ''
+         },
+         ownerName() {
+-            return this.configuredOwnerName || 'Sanyue'
++            return this.configuredOwnerName || 'ihyuaan'
+         },
+         headerTitle() {
+-            return this.configuredOwnerName || 'Sanyue ImgHub'
++            return this.configuredOwnerName || 'ihyuaan ImgHub'
+         },
+         dialogWidth() {
+             return window.innerWidth > 768 ? '50%' : '90%'

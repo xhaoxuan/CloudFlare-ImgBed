@@ -37,12 +37,27 @@
  *   }
  */
 
+import { getDatabase, checkDatabaseConfig } from './databaseAdapter.js';
+import { getFileTypeCategory } from './mimeTypes.js';
+
 const INDEX_KEY = 'manage@index';
 const INDEX_META_KEY = 'manage@index@meta'; // 索引元数据键
 const OPERATION_KEY_PREFIX = 'manage@index@operation_';
-const INDEX_CHUNK_SIZE = 10000; // 索引分块大小
-const KV_LIST_LIMIT = 1000; // KV 列出批量大小
+// D1 单字段限制 2MB，KV 限制 25MB，根据数据库类型动态设置
+const INDEX_CHUNK_SIZE_D1 = 500; // D1 数据库分块大小
+const INDEX_CHUNK_SIZE_KV = 5000; // KV 存储分块大小
+const KV_LIST_LIMIT = 1000; // 数据库列出批量大小
 const BATCH_SIZE = 10; // 批量处理大小
+
+/**
+ * 根据数据库类型获取索引分块大小
+ * @param {Object} env - 环境变量
+ * @returns {number} 分块大小
+ */
+export function getIndexChunkSize(env) {
+    const config = checkDatabaseConfig(env);
+    return config.usingD1 ? INDEX_CHUNK_SIZE_D1 : INDEX_CHUNK_SIZE_KV;
+}
 
 /**
  * 添加文件到索引
@@ -52,11 +67,12 @@ const BATCH_SIZE = 10; // 批量处理大小
  */
 export async function addFileToIndex(context, fileId, metadata = null) {
     const { env } = context;
+    const db = getDatabase(env);
 
     try {
         if (metadata === null) {
-            // 如果未传入metadata，尝试从KV中获取
-            const fileData = await env.img_url.getWithMetadata(fileId);
+            // 如果未传入metadata，尝试从数据库中获取
+            const fileData = await db.getWithMetadata(fileId);
             metadata = fileData.metadata || {};
         }
 
@@ -86,6 +102,7 @@ export async function batchAddFilesToIndex(context, files, options = {}) {
     try {
         const { env } = context;
         const { skipExisting = false } = options;
+        const db = getDatabase(env);
 
         // 处理每个文件的metadata
         const processedFiles = [];
@@ -93,10 +110,10 @@ export async function batchAddFilesToIndex(context, files, options = {}) {
             const { fileId, metadata } = fileItem;
             let finalMetadata = metadata;
 
-            // 如果没有提供metadata，尝试从KV中获取
+            // 如果没有提供metadata，尝试从数据库中获取
             if (!finalMetadata) {
                 try {
-                    const fileData = await env.img_url.getWithMetadata(fileId);
+                    const fileData = await db.getWithMetadata(fileId);
                     finalMetadata = fileData.metadata || {};
                 } catch (error) {
                     console.warn(`Failed to get metadata for file ${fileId}:`, error);
@@ -191,13 +208,14 @@ export async function batchRemoveFilesFromIndex(context, fileIds) {
 export async function moveFileInIndex(context, originalFileId, newFileId, newMetadata = null) {
     try {
         const { env } = context;
+        const db = getDatabase(env);
 
         // 确定最终的metadata
         let finalMetadata = newMetadata;
         if (finalMetadata === null) {
-            // 如果没有提供新metadata，尝试从KV中获取
+            // 如果没有提供新metadata，尝试从数据库中获取
             try {
-                const fileData = await env.img_url.getWithMetadata(newFileId);
+                const fileData = await db.getWithMetadata(newFileId);
                 finalMetadata = fileData.metadata || {};
             } catch (error) {
                 console.warn(`Failed to get metadata for new file ${newFileId}:`, error);
@@ -229,6 +247,7 @@ export async function moveFileInIndex(context, originalFileId, newFileId, newMet
 export async function batchMoveFilesInIndex(context, moveOperations) {
     try {
         const { env } = context;
+        const db = getDatabase(env);
 
         // 处理每个移动操作的metadata
         const processedOperations = [];
@@ -238,9 +257,9 @@ export async function batchMoveFilesInIndex(context, moveOperations) {
             // 确定最终的metadata
             let finalMetadata = metadata;
             if (finalMetadata === null || finalMetadata === undefined) {
-                // 如果没有提供新metadata，尝试从KV中获取
+                // 如果没有提供新metadata，尝试从数据库中获取
                 try {
-                    const fileData = await env.img_url.getWithMetadata(newFileId);
+                    const fileData = await db.getWithMetadata(newFileId);
                     finalMetadata = fileData.metadata || {};
                 } catch (error) {
                     console.warn(`Failed to get metadata for new file ${newFileId}:`, error);
@@ -457,8 +476,14 @@ export async function mergeOperationsToIndex(context, options = {}) {
  * @param {string} options.directory - 目录过滤
  * @param {number} options.start - 起始位置
  * @param {number} options.count - 返回数量，-1 表示返回所有
- * @param {string} options.channel - 渠道过滤
- * @param {string} options.listType - 列表类型过滤
+ * @param {Array<string>|string} options.channel - 渠道过滤（支持数组多选）
+ * @param {Array<string>|string} options.listType - 列表类型过滤（支持数组多选）
+ * @param {Array<string>|string} options.accessStatus - 访问状态筛选（支持数组多选）：'normal'=正常, 'blocked'=已屏蔽
+ * @param {Array<string>|string} options.label - 审查结果筛选（支持数组多选）
+ * @param {Array<string>|string} options.fileType - 文件类型筛选（支持数组多选）
+ * @param {Array<string>|string} options.channelName - 渠道名称筛选（支持数组多选）
+ * @param {Array<string>} options.includeTags - 必须包含的标签数组
+ * @param {Array<string>} options.excludeTags - 必须排除的标签数组
  * @param {boolean} options.countOnly - 仅返回总数
  * @param {boolean} options.includeSubdirFiles - 是否包含子目录下的文件
  */
@@ -469,11 +494,26 @@ export async function readIndex(context, options = {}) {
             directory = '',
             start = 0,
             count = 50,
-            channel = '',
-            listType = '',
+            channel = [],
+            listType = [],
+            accessStatus = [],
+            label = [],
+            fileType = [],
+            channelName = [],
+            includeTags = [],
+            excludeTags = [],
             countOnly = false,
             includeSubdirFiles = false
         } = options;
+
+        // 将参数统一转换为数组形式
+        const channelArr = Array.isArray(channel) ? channel : (channel ? [channel] : []);
+        const listTypeArr = Array.isArray(listType) ? listType : (listType ? [listType] : []);
+        const accessStatusArr = Array.isArray(accessStatus) ? accessStatus : (accessStatus ? [accessStatus] : []);
+        const labelArr = Array.isArray(label) ? label : (label ? [label] : []);
+        const fileTypeArr = Array.isArray(fileType) ? fileType : (fileType ? [fileType] : []);
+        const channelNameArr = Array.isArray(channelName) ? channelName : (channelName ? [channelName] : []);
+
         // 处理目录满足无头有尾的格式，根目录为空
         const dirPrefix = directory === '' || directory.endsWith('/') ? directory : directory + '/';
 
@@ -500,26 +540,138 @@ export async function readIndex(context, options = {}) {
             });
         }
 
-        // 渠道过滤
-        if (channel) {
+        // 渠道过滤（支持多选，OR 逻辑）
+        if (channelArr.length > 0) {
             filteredFiles = filteredFiles.filter(file => 
-                file.metadata.Channel.toLowerCase() === channel.toLowerCase()
+                channelArr.some(ch => file.metadata.Channel?.toLowerCase() === ch.toLowerCase())
             );
         }
 
-        // 列表类型过滤
-        if (listType) {
-            filteredFiles = filteredFiles.filter(file => 
-                file.metadata.ListType === listType
-            );
+        // 列表类型过滤（黑白名单，支持多选，OR 逻辑）
+        // White=白名单, Block=黑名单, None=未设置
+        if (listTypeArr.length > 0) {
+            filteredFiles = filteredFiles.filter(file => {
+                const fileListType = file.metadata.ListType;
+                return listTypeArr.some(lt => {
+                    if (lt === 'None') {
+                        // 未设置：ListType 为空、undefined、null 或字符串 'None'
+                        return !fileListType || fileListType === '' || fileListType === 'None';
+                    }
+                    return fileListType === lt;
+                });
+            });
         }
 
-        // 搜索过滤
+        // 访问状态筛选（综合判断 ListType 和 Label，支持多选，OR 逻辑）
+        // 'normal' = 正常：非已屏蔽状态
+        // 'blocked' = 已屏蔽：ListType === 'Block' || (Label === 'adult' && ListType !== 'White')
+        // 注意：白名单优先，即使 Label 是 adult，只要 ListType 是 White 就是正常
+        if (accessStatusArr.length > 0) {
+            filteredFiles = filteredFiles.filter(file => {
+                const fileListType = file.metadata.ListType;
+                const fileLabel = file.metadata.Label;
+                const isBlocked = fileListType === 'Block' || (fileLabel === 'adult' && fileListType !== 'White');
+
+                return accessStatusArr.some(status => {
+                    if (status === 'normal') {
+                        return !isBlocked;
+                    } else if (status === 'blocked') {
+                        return isBlocked;
+                    }
+                    return false;
+                });
+            });
+        }
+
+        // 审查结果筛选 (label)（支持多选，OR 逻辑）
+        // 'normal' 匹配 Label 为 'everyone', 'None', '', null, undefined
+        // 'teen' 匹配 Label 为 'teen'
+        // 'adult' 匹配 Label 为 'adult'
+        if (labelArr.length > 0) {
+            filteredFiles = filteredFiles.filter(file => {
+                const fileLabel = file.metadata.Label;
+                return labelArr.some(lbl => {
+                    if (lbl === 'normal') {
+                        return !fileLabel || fileLabel === '' || fileLabel === 'None' || fileLabel === 'everyone';
+                    } else if (lbl === 'teen') {
+                        return fileLabel === 'teen';
+                    } else if (lbl === 'adult') {
+                        return fileLabel === 'adult';
+                    }
+                    return false;
+                });
+            });
+        }
+
+        // 文件类型筛选 (fileType)（支持多选，OR 逻辑）
+        // 'image' 匹配 FileType 以 'image/' 开头
+        // 'video' 匹配 FileType 以 'video/' 开头
+        // 'audio' 匹配 FileType 以 'audio/' 开头
+        // 'other' 匹配不属于以上三类的文件
+        if (fileTypeArr.length > 0) {
+            filteredFiles = filteredFiles.filter(file => {
+                return fileTypeArr.includes(getFileTypeCategory(file.metadata.FileType));
+            });
+        }
+
+        // 渠道名称筛选 (channelName)（支持多选，OR 逻辑）
+        // 支持 "type:name" 格式（如 "TelegramNew:default"）或单独的名称
+        if (channelNameArr.length > 0) {
+            filteredFiles = filteredFiles.filter(file => {
+                const fileChannel = file.metadata.Channel;
+                const fileChannelName = file.metadata.ChannelName;
+
+                return channelNameArr.some(filterValue => {
+                    // 检查是否是 "type:name" 格式
+                    if (filterValue.includes(':')) {
+                        const [type, name] = filterValue.split(':', 2);
+                        // 同时匹配渠道类型和名称（大小写敏感）
+                        return fileChannel === type && fileChannelName === name;
+                    } else {
+                        // 只匹配名称（向后兼容）
+                        return fileChannelName === filterValue;
+                    }
+                });
+            });
+        }
+
+        // 标签过滤（独立于搜索关键字）
+        if (includeTags.length > 0 || excludeTags.length > 0) {
+            filteredFiles = filteredFiles.filter(file => {
+                const fileTags = (file.metadata.Tags || []).map(t => t.toLowerCase());
+
+                // 检查必须包含的标签
+                if (includeTags.length > 0) {
+                    const hasAllIncludeTags = includeTags.every(tag => 
+                        fileTags.includes(tag.toLowerCase())
+                    );
+                    if (!hasAllIncludeTags) {
+                        return false;
+                    }
+                }
+
+                // 检查必须排除的标签
+                if (excludeTags.length > 0) {
+                    const hasAnyExcludeTag = excludeTags.some(tag => 
+                        fileTags.includes(tag.toLowerCase())
+                    );
+                    if (hasAnyExcludeTag) {
+                        return false;
+                    }
+                }
+
+                return true;
+            });
+        }
+
+        // 搜索过滤（仅关键字）
         if (search) {
             const searchLower = search.toLowerCase();
             filteredFiles = filteredFiles.filter(file => {
-                return file.metadata.FileName?.toLowerCase().includes(searchLower) ||
+                const matchesKeyword =
+                    file.metadata.FileName?.toLowerCase().includes(searchLower) ||
                     file.id.toLowerCase().includes(searchLower);
+                return matchesKeyword;
             });
         }
 
@@ -536,12 +688,16 @@ export async function readIndex(context, options = {}) {
 
         let resultFiles = filteredFiles;
 
+        // 计算当前目录下的直接文件（不包含子目录文件）
+        const directFiles = filteredFiles.filter(file => {
+            const fileDir = file.metadata.Directory ? file.metadata.Directory : extractDirectory(file.id);
+            return fileDir === dirPrefix;
+        });
+        const directFileCount = directFiles.length;
+
         // 如果不包含子目录文件，获取当前目录下的直接文件
         if (!includeSubdirFiles) {
-            resultFiles = filteredFiles.filter(file => {
-                const fileDir = file.metadata.Directory ? file.metadata.Directory : extractDirectory(file.id);
-                return fileDir === dirPrefix;
-            });
+            resultFiles = directFiles;
         }
 
         if (count !== -1) {
@@ -564,10 +720,15 @@ export async function readIndex(context, options = {}) {
             }
         });
 
+        // 直接子文件夹数目
+        const directFolderCount = directories.size;
+
         return {
             files: resultFiles,
             directories: Array.from(directories),
             totalCount: totalCount,
+            directFileCount: directFileCount,
+            directFolderCount: directFolderCount,
             indexLastUpdated: index.lastUpdated,
             returnedCount: resultFiles.length,
             success: true
@@ -587,12 +748,13 @@ export async function readIndex(context, options = {}) {
 }
 
 /**
- * 重建索引（从 KV 中的所有文件重新构建索引）
+ * 重建索引（从数据库中的所有文件重新构建索引）
  * @param {Object} context - 上下文对象
  * @param {Function} progressCallback - 进度回调函数
  */
 export async function rebuildIndex(context, progressCallback = null) {
     const { env, waitUntil } = context;
+    const db = getDatabase(env);
 
     try {
         console.log('Starting index rebuild...');
@@ -608,7 +770,7 @@ export async function rebuildIndex(context, progressCallback = null) {
 
         // 分批读取所有文件
         while (true) {
-            const response = await env.img_url.list({
+            const response = await db.list({
                 limit: KV_LIST_LIMIT,
                 cursor: cursor
             });
@@ -686,8 +848,9 @@ export async function rebuildIndex(context, progressCallback = null) {
 /**
  * 获取索引信息
  * @param {Object} context - 上下文对象
+ * @param {Object} options - 统计选项
  */
-export async function getIndexInfo(context) {
+export async function getIndexInfo(context, options = {}) {
     try {
         const index = await getIndex(context);
 
@@ -701,29 +864,31 @@ export async function getIndexInfo(context) {
         }
 
         // 统计各渠道文件数量
-        const channelStats = {};
-        const directoryStats = {};
-        const typeStats = {};
+        const channelStats = Object.create(null);
+        const directoryStats = Object.create(null);
+        const typeStats = Object.create(null);
+        const uploadTrend = createUploadTrendAccumulator(index.files, options);
         
         index.files.forEach(file => {
+            const metadata = file.metadata || {};
+
             // 渠道统计
-            let channel = file.metadata.Channel || 'Telegraph';
-            if (channel === 'TelegramNew') {
-                channel = 'Telegram';
-            }
-            channelStats[channel] = (channelStats[channel] || 0) + 1;
+            const channel = normalizeChannel(metadata.Channel);
+            incrementStat(channelStats, channel);
 
             // 目录统计
-            const dir = file.metadata.Directory || extractDirectory(file.id) || '/';
-            directoryStats[dir] = (directoryStats[dir] || 0) + 1;
+            const dir = metadata.Directory || extractDirectory(file.id) || '/';
+            incrementStat(directoryStats, dir);
             
             // 类型统计
-            let listType = file.metadata.ListType || 'None';
-            const label = file.metadata.Label || 'None';
+            let listType = metadata.ListType || 'None';
+            const label = metadata.Label || 'None';
             if (listType !== 'White' && label === 'adult') {
                 listType = 'Block';
             }
-            typeStats[listType] = (typeStats[listType] || 0) + 1;
+            incrementStat(typeStats, listType);
+
+            addUploadTrendPoint(uploadTrend, metadata, channel);
         });
 
         return {
@@ -733,12 +898,378 @@ export async function getIndexInfo(context) {
             channelStats,
             directoryStats,
             typeStats,
+            uploadTrend: finalizeUploadTrend(uploadTrend),
             oldestFile: index.files[index.files.length - 1],
             newestFile: index.files[0]
         };
     } catch (error) {
         console.error('Error getting index info:', error);
         return null;
+    }
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_TREND_MAX_POINTS = 90;
+const MAX_TREND_POINTS = 366;
+const DEFAULT_TREND_SERIES_LIMIT = 8;
+const MAX_TREND_SERIES_LIMIT = 20;
+
+function incrementStat(stats, key) {
+    const normalizedKey = normalizeTrendKey(key);
+    stats[normalizedKey] = (stats[normalizedKey] || 0) + 1;
+}
+
+function normalizeChannel(channel) {
+    if (channel === 'TelegramNew') {
+        return 'Telegram';
+    }
+    return normalizeTrendKey(channel, 'Telegraph');
+}
+
+function normalizeTrendKey(value, fallback = 'Unknown') {
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        return trimmed || fallback;
+    }
+    if (value === null || value === undefined) {
+        return fallback;
+    }
+    return String(value);
+}
+
+function normalizeInteger(value, defaultValue, min, max) {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed)) {
+        return defaultValue;
+    }
+    return Math.min(max, Math.max(min, parsed));
+}
+
+function getLocalDayNumber(timestamp, timezoneOffset) {
+    return Math.floor((timestamp - timezoneOffset * 60 * 1000) / DAY_MS);
+}
+
+function getValidTimestamp(metadata) {
+    const timestamp = Number(metadata?.TimeStamp);
+    return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : null;
+}
+
+function formatTrendDay(dayNumber) {
+    return new Date(dayNumber * DAY_MS).toISOString().slice(0, 10);
+}
+
+function parseTrendDate(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+
+    const match = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) {
+        return null;
+    }
+
+    const year = Number.parseInt(match[1], 10);
+    const month = Number.parseInt(match[2], 10);
+    const day = Number.parseInt(match[3], 10);
+    const date = new Date(Date.UTC(year, month - 1, day));
+
+    if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+        return null;
+    }
+
+    return Math.floor(date.getTime() / DAY_MS);
+}
+
+function getTrendDayRange(files, timezoneOffset, options = {}) {
+    let newestDay = null;
+    let oldestDay = null;
+    const optionStartDay = parseTrendDate(options.startDate);
+    const optionEndDay = parseTrendDate(options.endDate);
+
+    // The index is maintained in timestamp-desc order, so this avoids sorting.
+    for (let i = 0; i < files.length; i++) {
+        const timestamp = getValidTimestamp(files[i].metadata);
+        if (timestamp !== null) {
+            newestDay = getLocalDayNumber(timestamp, timezoneOffset);
+            break;
+        }
+    }
+
+    for (let i = files.length - 1; i >= 0; i--) {
+        const timestamp = getValidTimestamp(files[i].metadata);
+        if (timestamp !== null) {
+            oldestDay = getLocalDayNumber(timestamp, timezoneOffset);
+            break;
+        }
+    }
+
+    if (optionStartDay !== null || optionEndDay !== null) {
+        const startDay = optionStartDay !== null ? optionStartDay : (oldestDay !== null ? oldestDay : optionEndDay);
+        const endDay = optionEndDay !== null ? optionEndDay : (newestDay !== null ? newestDay : optionStartDay);
+        return startDay <= endDay
+            ? { startDay, endDay }
+            : { startDay: endDay, endDay: startDay };
+    }
+
+    if (newestDay === null || oldestDay === null) {
+        return null;
+    }
+
+    if (oldestDay > newestDay) {
+        return { startDay: newestDay, endDay: oldestDay };
+    }
+
+    return { startDay: oldestDay, endDay: newestDay };
+}
+
+function buildTrendBucketLabels(startDay, endDay, bucketSizeDays, bucketCount) {
+    const labels = [];
+    for (let i = 0; i < bucketCount; i++) {
+        const bucketStartDay = startDay + i * bucketSizeDays;
+        const bucketEndDay = Math.min(bucketStartDay + bucketSizeDays - 1, endDay);
+        labels.push(bucketStartDay === bucketEndDay
+            ? formatTrendDay(bucketStartDay)
+            : `${formatTrendDay(bucketStartDay)} - ${formatTrendDay(bucketEndDay)}`);
+    }
+    return labels;
+}
+
+function createUploadTrendAccumulator(files, options) {
+    const timezoneOffset = normalizeInteger(options.timezoneOffset, 0, -14 * 60, 14 * 60);
+    const maxPoints = normalizeInteger(options.maxPoints, DEFAULT_TREND_MAX_POINTS, 7, MAX_TREND_POINTS);
+    const seriesLimit = normalizeInteger(options.seriesLimit, DEFAULT_TREND_SERIES_LIMIT, 1, MAX_TREND_SERIES_LIMIT);
+    const range = getTrendDayRange(files, timezoneOffset, options);
+
+    if (!range) {
+        return {
+            enabled: false,
+            timezoneOffset,
+            maxPoints,
+            seriesLimit
+        };
+    }
+
+    const spanDays = range.endDay - range.startDay + 1;
+    const bucketSizeDays = Math.max(1, Math.ceil(spanDays / maxPoints));
+    const bucketCount = Math.ceil(spanDays / bucketSizeDays);
+
+    return {
+        enabled: true,
+        timezoneOffset,
+        maxPoints,
+        seriesLimit,
+        startDay: range.startDay,
+        endDay: range.endDay,
+        bucketSizeDays,
+        bucketCount,
+        labels: buildTrendBucketLabels(range.startDay, range.endDay, bucketSizeDays, bucketCount),
+        total: Array(bucketCount).fill(0),
+        channelGroups: new Map(),
+        channelNameGroups: new Map()
+    };
+}
+
+function addUploadTrendPoint(accumulator, metadata, channel) {
+    if (!accumulator.enabled) {
+        return;
+    }
+
+    const timestamp = getValidTimestamp(metadata);
+    if (timestamp === null) {
+        return;
+    }
+
+    const dayNumber = getLocalDayNumber(timestamp, accumulator.timezoneOffset);
+    const bucketIndex = Math.floor((dayNumber - accumulator.startDay) / accumulator.bucketSizeDays);
+    if (bucketIndex < 0 || bucketIndex >= accumulator.bucketCount) {
+        return;
+    }
+
+    const channelName = normalizeTrendKey(metadata.ChannelName, channel);
+
+    accumulator.total[bucketIndex] += 1;
+    addTrendGroupPoint(accumulator.channelGroups, channel, bucketIndex);
+    addTrendGroupPoint(accumulator.channelNameGroups, channelName, bucketIndex);
+}
+
+function addTrendGroupPoint(groups, key, bucketIndex) {
+    const normalizedKey = normalizeTrendKey(key);
+    let entry = groups.get(normalizedKey);
+    if (!entry) {
+        entry = {
+            total: 0,
+            buckets: new Map()
+        };
+        groups.set(normalizedKey, entry);
+    }
+
+    entry.total += 1;
+    entry.buckets.set(bucketIndex, (entry.buckets.get(bucketIndex) || 0) + 1);
+}
+
+function buildTrendSeries(groups, bucketCount, seriesLimit) {
+    const selectedEntries = selectTopTrendEntries(groups, seriesLimit);
+    const selectedNames = new Set(selectedEntries.map(([name]) => name));
+    const series = selectedEntries.map(([name, entry]) => ({
+        name,
+        total: entry.total,
+        data: buildTrendSeriesData(entry, bucketCount)
+    }));
+
+    if (groups.size > selectedEntries.length) {
+        const otherData = Array(bucketCount).fill(0);
+        let otherTotal = 0;
+
+        for (const [name, entry] of groups.entries()) {
+            if (selectedNames.has(name)) {
+                continue;
+            }
+            otherTotal += entry.total;
+            entry.buckets.forEach((count, bucketIndex) => {
+                otherData[bucketIndex] += count;
+            });
+        }
+
+        series.push({
+            name: '__other__',
+            isOther: true,
+            total: otherTotal,
+            data: otherData
+        });
+    }
+
+    return {
+        series,
+        totalSeries: groups.size,
+        limited: groups.size > selectedEntries.length
+    };
+}
+
+function selectTopTrendEntries(groups, seriesLimit) {
+    const topEntries = [];
+
+    for (const entry of groups.entries()) {
+        insertTopTrendEntry(topEntries, entry, seriesLimit);
+    }
+
+    return topEntries;
+}
+
+function insertTopTrendEntry(topEntries, candidate, seriesLimit) {
+    let insertIndex = -1;
+
+    for (let i = 0; i < topEntries.length; i++) {
+        if (compareTrendEntry(candidate, topEntries[i]) < 0) {
+            insertIndex = i;
+            break;
+        }
+    }
+
+    if (insertIndex === -1) {
+        if (topEntries.length < seriesLimit) {
+            topEntries.push(candidate);
+        }
+        return;
+    }
+
+    topEntries.splice(insertIndex, 0, candidate);
+    if (topEntries.length > seriesLimit) {
+        topEntries.pop();
+    }
+}
+
+function compareTrendEntry(left, right) {
+    if (right[1].total !== left[1].total) {
+        return right[1].total - left[1].total;
+    }
+    return left[0].localeCompare(right[0]);
+}
+
+function buildTrendSeriesData(entry, bucketCount) {
+    const data = Array(bucketCount).fill(0);
+    entry.buckets.forEach((count, bucketIndex) => {
+        data[bucketIndex] = count;
+    });
+    return data;
+}
+
+function finalizeUploadTrend(accumulator) {
+    const emptyGroup = {
+        series: [],
+        totalSeries: 0,
+        limited: false
+    };
+
+    if (!accumulator.enabled) {
+        return {
+            labels: [],
+            total: [],
+            bucketSizeDays: 1,
+            maxPoints: accumulator.maxPoints,
+            seriesLimit: accumulator.seriesLimit,
+            range: null,
+            groupBy: {
+                channel: emptyGroup,
+                channelName: emptyGroup
+            }
+        };
+    }
+
+    return {
+        labels: accumulator.labels,
+        total: accumulator.total,
+        bucketSizeDays: accumulator.bucketSizeDays,
+        maxPoints: accumulator.maxPoints,
+        seriesLimit: accumulator.seriesLimit,
+        range: {
+            startDate: formatTrendDay(accumulator.startDay),
+            endDate: formatTrendDay(accumulator.endDay),
+            timezoneOffset: accumulator.timezoneOffset
+        },
+        groupBy: {
+            channel: buildTrendSeries(accumulator.channelGroups, accumulator.bucketCount, accumulator.seriesLimit),
+            channelName: buildTrendSeries(accumulator.channelNameGroups, accumulator.bucketCount, accumulator.seriesLimit)
+        }
+    };
+}
+
+/**
+ * 获取索引元数据（轻量级，只读取 meta，不读取整个索引）
+ * 用于容量检查等场景，避免读取整个索引
+ * @param {Object} context - 上下文对象
+ * @returns {Object} 索引元数据，包含 totalCount, totalSizeMB, channelStats 等
+ */
+export async function getIndexMeta(context) {
+    const { env } = context;
+    const db = getDatabase(env);
+
+    try {
+        const metadataStr = await db.get(INDEX_META_KEY);
+        if (!metadataStr) {
+            return {
+                success: false,
+                totalCount: 0,
+                totalSizeMB: 0,
+                channelStats: {}
+            };
+        }
+
+        const metadata = JSON.parse(metadataStr);
+        return {
+            success: true,
+            totalCount: metadata.totalCount || 0,
+            totalSizeMB: metadata.totalSizeMB || 0,
+            channelStats: metadata.channelStats || {},
+            lastUpdated: metadata.lastUpdated
+        };
+    } catch (error) {
+        console.error('Error getting index meta:', error);
+        return {
+            success: false,
+            totalCount: 0,
+            totalSizeMB: 0,
+            channelStats: {}
+        };
     }
 }
 
@@ -761,6 +1292,7 @@ function generateOperationId() {
  */
 async function recordOperation(context, type, data) {
     const { env } = context;
+    const db = getDatabase(env);
 
     const operationId = generateOperationId();
     const operation = {
@@ -770,7 +1302,7 @@ async function recordOperation(context, type, data) {
     };
     
     const operationKey = OPERATION_KEY_PREFIX + operationId;
-    await env.img_url.put(operationKey, JSON.stringify(operation));
+    await db.put(operationKey, JSON.stringify(operation));
 
     return operationId;
 }
@@ -782,6 +1314,7 @@ async function recordOperation(context, type, data) {
  */
 async function getAllPendingOperations(context, lastOperationId = null) {
     const { env } = context;
+    const db = getDatabase(env);
 
     const operations = [];
 
@@ -792,7 +1325,7 @@ async function getAllPendingOperations(context, lastOperationId = null) {
 
     try {
         while (true) {
-            const response = await env.img_url.list({
+            const response = await db.list({
                 prefix: OPERATION_KEY_PREFIX,
                 limit: KV_LIST_LIMIT,
                 cursor: cursor
@@ -810,7 +1343,7 @@ async function getAllPendingOperations(context, lastOperationId = null) {
                 }
 
                 try {
-                    const operationData = await env.img_url.get(item.name);
+                    const operationData = await db.get(item.name);
                     if (operationData) {
                         const operation = JSON.parse(operationData);
                         operation.id = item.name.substring(OPERATION_KEY_PREFIX.length);
@@ -1005,6 +1538,7 @@ function applyBatchMoveOperation(index, data) {
  */
 async function cleanupOperations(context, operationIds, concurrency = 10) {
     const { env } = context;
+    const db = getDatabase(env);
 
     try {
         console.log(`Cleaning up ${operationIds.length} processed operations with concurrency ${concurrency}...`);
@@ -1017,7 +1551,7 @@ async function cleanupOperations(context, operationIds, concurrency = 10) {
             const operationKey = OPERATION_KEY_PREFIX + operationId;
             return async () => {
                 try {
-                    await env.img_url.delete(operationKey);
+                    await db.delete(operationKey);
                     deletedCount++;
                 } catch (error) {
                     console.error(`Error deleting operation ${operationId}:`, error);
@@ -1048,6 +1582,7 @@ async function cleanupOperations(context, operationIds, concurrency = 10) {
  */
 export async function deleteAllOperations(context) {
     const { request, env } = context;
+    const db = getDatabase(env);
     
     try {
         console.log('Starting to delete all atomic operations...');
@@ -1059,7 +1594,7 @@ export async function deleteAllOperations(context) {
         
         // 首先收集所有操作键
         while (true) {
-            const response = await env.img_url.list({
+            const response = await db.list({
                 prefix: OPERATION_KEY_PREFIX,
                 limit: KV_LIST_LIMIT,
                 cursor: cursor
@@ -1161,6 +1696,103 @@ function extractDirectory(filePath) {
 }
 
 /**
+ * 将扁平目录路径列表转换为嵌套树结构
+ * @param {Array<string>} directories - 目录路径数组，如 ['photos/', 'photos/2024/', 'documents/']
+ * @returns {Object} 树形结构 { name, path, children }
+ * 
+ * 示例输出：
+ * {
+ *   name: "/",
+ *   path: "",
+ *   children: [
+ *     {
+ *       name: "photos",
+ *       path: "photos/",
+ *       children: [
+ *         { name: "2024", path: "photos/2024/", children: [] }
+ *       ]
+ *     },
+ *     { name: "documents", path: "documents/", children: [] }
+ *   ]
+ * }
+ */
+function buildTree(directories) {
+    // 创建根节点
+    const root = {
+        name: "/",
+        path: "",
+        children: []
+    };
+
+    // 如果没有目录，返回仅包含根节点的空树
+    if (!directories || directories.length === 0) {
+        return root;
+    }
+
+    // 使用 Map 存储已创建的节点，key 为路径
+    const nodeMap = new Map();
+    nodeMap.set("", root);
+
+    // 对目录进行排序，确保父目录在子目录之前处理
+    const sortedDirs = [...directories].sort();
+
+    for (const dirPath of sortedDirs) {
+        // 跳过空路径（根目录已创建）
+        if (!dirPath) continue;
+
+        // 规范化路径：确保以 / 结尾
+        const normalizedPath = dirPath.endsWith('/') ? dirPath : dirPath + '/';
+
+        // 如果节点已存在，跳过
+        if (nodeMap.has(normalizedPath)) continue;
+
+        // 分割路径获取各级目录名
+        const parts = normalizedPath.split('/').filter(part => part !== '');
+
+        // 逐级创建节点
+        let currentPath = "";
+        let parentNode = root;
+
+        for (let i = 0; i < parts.length; i++) {
+            const part = parts[i];
+            currentPath = currentPath + part + '/';
+
+            // 检查当前路径的节点是否已存在
+            if (nodeMap.has(currentPath)) {
+                parentNode = nodeMap.get(currentPath);
+            } else {
+                // 创建新节点
+                const newNode = {
+                    name: part,
+                    path: currentPath,
+                    children: []
+                };
+
+                // 添加到父节点的 children 中
+                parentNode.children.push(newNode);
+
+                // 存储到 Map 中
+                nodeMap.set(currentPath, newNode);
+
+                // 更新父节点引用
+                parentNode = newNode;
+            }
+        }
+    }
+
+    // 对每个节点的 children 按名称排序
+    const sortChildren = (node) => {
+        node.children.sort((a, b) => a.name.localeCompare(b.name));
+        node.children.forEach(sortChildren);
+    };
+    sortChildren(root);
+
+    return root;
+}
+
+
+
+/**
  * 将文件按时间戳倒序插入到已排序的数组中
  * @param {Array} sortedFiles - 已按时间戳倒序排序的文件数组
  * @param {Object} fileItem - 要插入的文件项
@@ -1234,44 +1866,67 @@ async function promiseLimit(tasks, concurrency = BATCH_SIZE) {
 }
 
 /**
- * 保存分块索引到KV存储
+ * 保存分块索引到数据库
  * @param {Object} context - 上下文对象，包含 env
  * @param {Object} index - 完整的索引对象
  * @returns {Promise<boolean>} 是否保存成功
  */
 async function saveChunkedIndex(context, index) {
     const { env } = context;
+    const db = getDatabase(env);
+    const chunkSize = getIndexChunkSize(env);
     
     try {
         const files = index.files || [];
         const chunks = [];
         
         // 将文件数组分块
-        for (let i = 0; i < files.length; i += INDEX_CHUNK_SIZE) {
-            const chunk = files.slice(i, i + INDEX_CHUNK_SIZE);
+        for (let i = 0; i < files.length; i += chunkSize) {
+            const chunk = files.slice(i, i + chunkSize);
             chunks.push(chunk);
         }
         
-        // 保存索引元数据
+        // 计算各渠道容量统计
+        const channelStats = {};
+        let totalSizeMB = 0;
+        
+        for (const file of files) {
+            const channelName = file.metadata?.ChannelName;
+            const fileSize = parseFloat(file.metadata?.FileSize) || 0;
+            
+            totalSizeMB += fileSize;
+            
+            if (channelName) {
+                if (!channelStats[channelName]) {
+                    channelStats[channelName] = { usedMB: 0, fileCount: 0 };
+                }
+                channelStats[channelName].usedMB += fileSize;
+                channelStats[channelName].fileCount += 1;
+            }
+        }
+        
+        // 保存索引元数据（包含容量统计）
         const metadata = {
             lastUpdated: index.lastUpdated,
             totalCount: index.totalCount,
+            totalSizeMB: Math.round(totalSizeMB * 100) / 100,
+            channelStats,
             lastOperationId: index.lastOperationId,
             chunkCount: chunks.length,
-            chunkSize: INDEX_CHUNK_SIZE
+            chunkSize: chunkSize
         };
         
-        await env.img_url.put(INDEX_META_KEY, JSON.stringify(metadata));
+        await db.put(INDEX_META_KEY, JSON.stringify(metadata));
         
         // 保存各个分块
         const savePromises = chunks.map((chunk, chunkId) => {
             const chunkKey = `${INDEX_KEY}_${chunkId}`;
-            return env.img_url.put(chunkKey, JSON.stringify(chunk));
+            return db.put(chunkKey, JSON.stringify(chunk));
         });
         
         await Promise.all(savePromises);
         
-        console.log(`Saved chunked index: ${chunks.length} chunks, ${files.length} total files`);
+        console.log(`Saved chunked index: ${chunks.length} chunks, ${files.length} total files, ${totalSizeMB.toFixed(2)} MB`);
         return true;
         
     } catch (error) {
@@ -1281,16 +1936,17 @@ async function saveChunkedIndex(context, index) {
 }
 
 /**
- * 从KV存储加载分块索引
+ * 从数据库加载分块索引
  * @param {Object} context - 上下文对象，包含 env
  * @returns {Promise<Object>} 完整的索引对象
  */
 async function loadChunkedIndex(context) {
     const { env } = context;
-    
+    const db = getDatabase(env);
+
     try {
         // 首先获取元数据
-        const metadataStr = await env.img_url.get(INDEX_META_KEY);
+        const metadataStr = await db.get(INDEX_META_KEY);
         if (!metadataStr) {
             throw new Error('Index metadata not found');
         }
@@ -1303,7 +1959,7 @@ async function loadChunkedIndex(context) {
         for (let chunkId = 0; chunkId < metadata.chunkCount; chunkId++) {
             const chunkKey = `${INDEX_KEY}_${chunkId}`;
             loadPromises.push(
-                env.img_url.get(chunkKey).then(chunkStr => {
+                db.get(chunkKey).then(chunkStr => {
                     if (chunkStr) {
                         return JSON.parse(chunkStr);
                     }
@@ -1353,12 +2009,13 @@ async function loadChunkedIndex(context) {
  */
 export async function clearChunkedIndex(context, onlyNonUsed = false) {
     const { env } = context;
+    const db = getDatabase(env);
     
     try {
         console.log('Starting chunked index cleanup...');
         
         // 获取元数据
-        const metadataStr = await env.img_url.get(INDEX_META_KEY);
+        const metadataStr = await db.get(INDEX_META_KEY);
         let chunkCount = 0;
         
         if (metadataStr) {
@@ -1367,7 +2024,7 @@ export async function clearChunkedIndex(context, onlyNonUsed = false) {
 
             if (!onlyNonUsed) {
                 // 删除元数据
-                await env.img_url.delete(INDEX_META_KEY).catch(() => {});
+                await db.delete(INDEX_META_KEY).catch(() => {});
             }
         }
 
@@ -1375,7 +2032,7 @@ export async function clearChunkedIndex(context, onlyNonUsed = false) {
         const recordedChunks = []; // 现有的索引分块键
         let cursor = null;
         while (true) {
-            const response = await env.img_url.list({
+            const response = await db.list({
                 prefix: INDEX_KEY,
                 limit: KV_LIST_LIMIT,
                 cursor: cursor
@@ -1405,13 +2062,13 @@ export async function clearChunkedIndex(context, onlyNonUsed = false) {
             }
 
             deletePromises.push(
-                env.img_url.delete(chunkKey).catch(() => {})
+                db.delete(chunkKey).catch(() => {})
             );
         }
 
         if (recordedChunks.includes(INDEX_KEY)) {
             deletePromises.push(
-                env.img_url.delete(INDEX_KEY).catch(() => {})
+                db.delete(INDEX_KEY).catch(() => {})
             );
         }
 
@@ -1433,10 +2090,11 @@ export async function clearChunkedIndex(context, onlyNonUsed = false) {
  */
 export async function getIndexStorageStats(context) {
     const { env } = context;
-    
+    const db = getDatabase(env);
+
     try {
         // 获取元数据
-        const metadataStr = await env.img_url.get(INDEX_META_KEY);
+        const metadataStr = await db.get(INDEX_META_KEY);
         if (!metadataStr) {
             return {
                 success: false,
@@ -1452,7 +2110,7 @@ export async function getIndexStorageStats(context) {
         for (let chunkId = 0; chunkId < metadata.chunkCount; chunkId++) {
             const chunkKey = `${INDEX_KEY}_${chunkId}`;
             chunkChecks.push(
-                env.img_url.get(chunkKey).then(data => ({
+                db.get(chunkKey).then(data => ({
                     chunkId,
                     exists: !!data,
                     size: data ? data.length : 0
@@ -1482,4 +2140,47 @@ export async function getIndexStorageStats(context) {
             isChunked: false
         };
     }
+}
+
+
+
+/**
+ * 从索引中提取目录树结构
+ * @param {Object} context - 上下文对象
+ * @returns {Object} 树形结构 { name, path, children }
+ */
+export async function getDirectoryTree(context) {
+    // 1. 合并挂起操作
+    await mergeOperationsToIndex(context);
+
+    // 2. 获取索引
+    const index = await getIndex(context);
+
+    // 3. 提取所有目录路径
+    const directorySet = new Set();
+
+    if (index.files && index.files.length > 0) {
+        for (const file of index.files) {
+            // 获取文件的目录路径
+            const dirPath = file.metadata?.Directory || extractDirectory(file.id);
+
+            if (dirPath) {
+                // 规范化路径：确保以 / 结尾
+                const normalizedDir = dirPath.endsWith('/') ? dirPath : dirPath + '/';
+
+                // 将路径按 / 分割，逐级添加到目录集合中（确保父目录也被包含）
+                const parts = normalizedDir.split('/').filter(part => part !== '');
+                let currentPath = '';
+
+                for (const part of parts) {
+                    currentPath = currentPath + part + '/';
+                    directorySet.add(currentPath);
+                }
+            }
+        }
+    }
+
+    // 4. 构建树形结构
+    const directories = Array.from(directorySet);
+    return buildTree(directories);
 }
